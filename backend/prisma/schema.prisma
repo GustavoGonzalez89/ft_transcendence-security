@@ -1,0 +1,21 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Matches the existing table created by database/init.sql
+model User {
+  id            Int       @id @default(autoincrement())
+  email         String    @unique
+  username      String
+  password_hash String?
+  github_id     Int?      @unique
+  created_at    DateTime  @default(now())
+
+  @@map("users")
+}

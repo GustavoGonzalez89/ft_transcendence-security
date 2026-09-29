@@ -1,0 +1,176 @@
+# ft_transcendence-security — stack minimal WAF + Vault
+#
+# Flux : Navigateur → waf:8443 (ModSecurity + OWASP CRS, TLS)
+#                   → frontend:80 (Nginx, fichiers statiques + proxy /api)
+#                   → backend:3000 (Express + Prisma) → db:5432
+# Secrets : vault-unseal → vault ← vault-init (.env) ; backend lit Vault au démarrage
+
+services:
+
+  # ─── WAF : ModSecurity + OWASP CRS ─────────────────────────────────────────
+  # Point d'entrée HTTP/HTTPS de l'application
+  waf:
+    image: docker.io/owasp/modsecurity-crs:3.3.9-nginx-202606290906
+    # L'image tourne en "nginx" (UID 101) mais /etc/nginx appartient à root :
+    # sans ça l'entrypoint ne peut pas générer la config depuis les templates
+    # (problème rencontré sous Podman).
+    user: "0:0"
+    ports:
+      - "8080:8080"    # HTTP → redirigé vers HTTPS
+      - "8443:8443"    # HTTPS
+    environment:
+      - BACKEND=http://frontend:80
+      - MODSEC_RULE_ENGINE=On          # "On" bloque | "DetectionOnly" journalise seulement
+      - PARANOIA=1                     # niveau CRS : 1 (défaut) à 4 (le plus strict)
+      - ANOMALY_INBOUND=5              # bloque les requêtes avec un score >= 5
+      - ANOMALY_OUTBOUND=4             # bloque les réponses avec un score >= 4
+      - ALLOWED_METHODS=GET HEAD POST OPTIONS PUT PATCH DELETE
+      - NGINX_ALWAYS_TLS_REDIRECT=on
+    volumes:
+      # Exception pour l'accès par IP LAN (règles 920350 et 931100)
+      - ./waf/modsecurity/lan-ip-access-exception.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-901-LAN-IP-EXCEPTION.conf:ro,z
+      # Certificat autosigné généré par `make certs` (remplace celui de l'image)
+      - ./certs/cert.pem:/etc/nginx/conf/server.crt:ro,z
+      - ./certs/key.pem:/etc/nginx/conf/server.key:ro,z
+    depends_on:
+      - frontend
+    networks:
+      - app-net
+    restart: unless-stopped
+
+  # ─── Frontend : Nginx, fichiers statiques + proxy /api/* ───────────────────
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - app-net
+    restart: unless-stopped
+
+  # ─── Backend : Express + Prisma ────────────────────────────────────────────
+  # Lit les identifiants DB et les clés applicatives dans Vault au démarrage.
+  # Aucun mot de passe dans son bloc environment.
+  backend:
+    build: ./backend
+    volumes:
+      - vault_data:/vault/data:ro      # lecture de root-token.txt (voir "Limites")
+    environment:
+      - VAULT_ADDR=http://vault:8200   # adresse uniquement
+      - DB_HOST=db
+      - DB_PORT=5432
+    depends_on:
+      db:
+        condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - app-net
+    restart: unless-stopped
+
+  # ─── PostgreSQL ────────────────────────────────────────────────────────────
+  db:
+    image: docker.io/library/postgres:15-alpine
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro,z
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - app-net
+    restart: unless-stopped
+
+  # ─── Vault : HashiCorp Vault en mode serveur ───────────────────────────────
+  # Stockage chiffré sur disque (volume vault_data). Démarre scellé.
+  vault:
+    image: docker.io/hashicorp/vault:latest
+    # root dans le conteneur : l'entrypoint de l'image ne fait pas le chown de
+    # /vault/data (volume nommé créé root:root), on le fait avant de lancer le serveur.
+    user: root
+    ports:
+      - "8200:8200"    # API + UI Vault (voir "Limites")
+    environment:
+      - VAULT_ADDR=http://0.0.0.0:8200
+      - SKIP_SETCAP=1  # WSL2 : setcap / IPC_LOCK non disponibles
+    # cap_add: IPC_LOCK désactivé (WSL2) — disable_mlock=true dans local.json
+    command: sh -c "chown -R vault:vault /vault/data && exec docker-entrypoint.sh vault server -config=/vault/config/local.json"
+    volumes:
+      - ./vault/config:/vault/config:ro,z
+      - vault_data:/vault/data
+    networks:
+      - app-net
+    restart: unless-stopped
+
+  # ─── vault-unseal : init + déscellement + surveillance ─────────────────────
+  # 1er démarrage : vault operator init, clés écrites dans vault_data.
+  # Redémarrages : relit les clés, descelle, puis re-descelle si Vault redémarre.
+  vault-unseal:
+    image: docker.io/hashicorp/vault:latest
+    user: root
+    environment:
+      - VAULT_ADDR=http://vault:8200
+    volumes:
+      - vault_data:/vault/data
+      - ./vault/scripts:/vault/scripts:ro,z
+    depends_on:
+      - vault
+    command: sh /vault/scripts/vault-unseal.sh
+    networks:
+      - app-net
+    restart: unless-stopped
+
+  # ─── vault-init : charge les secrets du .env dans Vault (one-shot) ─────────
+  # secret/database → DB_USER, DB_PASSWORD, DB_NAME
+  # secret/app      → NEXTAUTH_SECRET, NEXTAUTH_URL, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET
+  # $$ : docker compose le transforme en $ ; c'est le shell du conteneur qui expand.
+  vault-init:
+    image: docker.io/hashicorp/vault:latest
+    environment:
+      - VAULT_ADDR=http://vault:8200
+      - DB_USER=${POSTGRES_USER}
+      - DB_PASS=${POSTGRES_PASSWORD}
+      - DB_NAME=${POSTGRES_DB}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - NEXTAUTH_URL=${NEXTAUTH_URL}
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}
+    volumes:
+      - vault_data:/vault/data:ro
+    depends_on:
+      vault-unseal:
+        condition: service_started
+    command: >
+      sh -c "
+        echo '[vault-init] Attente du root token (écrit par vault-unseal)...' &&
+        until [ -f /vault/data/root-token.txt ]; do sleep 2; done &&
+        export VAULT_TOKEN=$$(cat /vault/data/root-token.txt) &&
+        echo '[vault-init] Attente du déscellement de Vault...' &&
+        until vault status -address=$$VAULT_ADDR 2>&1 | grep -q 'Sealed.*false'; do sleep 2; done &&
+        echo '[vault-init] Vault prêt — chargement des secrets' &&
+        (vault secrets enable -path=secret kv-v2 || true) &&
+        vault kv put secret/database DB_USER=$$DB_USER DB_PASSWORD=$$DB_PASS DB_NAME=$$DB_NAME &&
+        vault kv put secret/app NEXTAUTH_SECRET=$$NEXTAUTH_SECRET NEXTAUTH_URL=$$NEXTAUTH_URL OAUTH_CLIENT_ID=$$OAUTH_CLIENT_ID OAUTH_CLIENT_SECRET=$$OAUTH_CLIENT_SECRET &&
+        echo '[vault-init] Secrets chargés avec succès'
+      "
+    networks:
+      - app-net
+
+volumes:
+  postgres_data:
+  vault_data:
+
+networks:
+  app-net:
+    driver: bridge

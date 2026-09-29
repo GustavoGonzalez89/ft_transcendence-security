@@ -1,0 +1,19 @@
+# Secrets — ne jamais commiter
+.env
+.env.*
+!.env.example
+certs/
+*.pem
+*.key
+vault/data/
+init-keys.txt
+root-token.txt
+
+# Dépendances et artefacts
+node_modules/
+*.log
+
+# Éditeurs / OS
+.vscode/
+.idea/
+.DS_Store

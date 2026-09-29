@@ -1,0 +1,16 @@
+{
+  "name": "practice-backend",
+  "version": "1.0.0",
+  "description": "ft_transcendence WAF+Vault practice — Express API",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.0.0",
+    "bcryptjs": "^2.4.3",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.0",
+    "prisma": "^5.0.0"
+  }
+}

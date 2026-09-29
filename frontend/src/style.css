@@ -1,0 +1,165 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: 'Courier New', monospace;
+  min-height: 100vh;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────────── */
+header {
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  padding: 20px 40px;
+}
+
+header h1 { color: #58a6ff; font-size: 1.4rem; }
+header p  { color: #8b949e; font-size: 0.8rem; margin-top: 4px; }
+
+/* ── Main container ──────────────────────────────────────────────────────────── */
+main {
+  margin: 50px auto;
+  max-width: 480px;
+  padding: 0 20px;
+}
+
+/* ── Views (login / register / dashboard) ────────────────────────────────────── */
+.view          { display: none; }
+.view.active   { display: block; }
+
+.view {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 32px;
+}
+
+h2 {
+  color: #e6edf3;
+  font-size: 1.15rem;
+  margin-bottom: 20px;
+}
+
+/* ── Forms ────────────────────────────────────────────────────────────────────── */
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+input {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #c9d1d9;
+  font-family: inherit;
+  font-size: 0.9rem;
+  padding: 10px 14px;
+  width: 100%;
+}
+
+input:focus {
+  border-color: #58a6ff;
+  outline: none;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────────────── */
+button {
+  background: #238636;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.9rem;
+  padding: 10px 16px;
+}
+
+button:hover { background: #2ea043; }
+
+#logout-btn           { background: #da3633; margin-bottom: 24px; }
+#logout-btn:hover     { background: #f85149; }
+
+/* ── Links ────────────────────────────────────────────────────────────────────── */
+a { color: #58a6ff; cursor: pointer; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ── Feedback message ─────────────────────────────────────────────────────────── */
+.message {
+  border-radius: 6px;
+  font-size: 0.85rem;
+  margin-bottom: 16px;
+  min-height: 20px;
+  padding: 10px 14px;
+  transition: opacity 0.3s;
+}
+.message:empty  { padding: 0; }
+.message.success { background: #0d4429; border: 1px solid #238636; color: #3fb950; }
+.message.error   { background: #490202; border: 1px solid #da3633; color: #f85149; }
+
+/* ── User info card ───────────────────────────────────────────────────────────── */
+#user-info {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  margin-bottom: 20px;
+  padding: 16px;
+}
+
+#user-info p             { font-size: 0.88rem; margin-bottom: 6px; }
+#user-info p:last-child  { margin-bottom: 0; }
+
+/* ── WAF Test Panel ───────────────────────────────────────────────────────────── */
+.waf-panel {
+  border: 1px solid #f0883e44;
+  border-radius: 6px;
+  margin-top: 24px;
+  padding: 20px;
+}
+
+.waf-panel h3 { color: #f0883e; font-size: 0.95rem; margin-bottom: 8px; }
+.waf-panel p  { color: #8b949e; font-size: 0.8rem; line-height: 1.5; margin-bottom: 12px; }
+
+.test-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.test-buttons button {
+  background: #21262d;
+  border: 1px solid #30363d;
+  font-size: 0.78rem;
+  padding: 7px 12px;
+}
+.test-buttons button:hover { background: #30363d; }
+
+.waf-result {
+  background: #0d1117;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  margin-bottom: 10px;
+  min-height: 28px;
+  padding: 8px 12px;
+}
+
+.waf-result.blocked { color: #f85149; }
+.waf-result.allowed { color: #3fb950; }
+
+.hint { color: #6e7681 !important; }
+
+code {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 0.78rem;
+  padding: 2px 6px;
+}

@@ -1,0 +1,169 @@
+# Extrait du docker-compose.yml du projet d'équipe Echo of Morse (ft_transcendence)
+# https://github.com/bonbonkeai/42_transcendence
+#
+# Seuls les services dont je suis responsable sont reproduits ici (waf, vault,
+# vault-unseal, vault-init). Les services web, ws et db appartiennent à l'équipe
+# et ne sont pas inclus : ce fichier est une référence, il ne se lance pas seul.
+
+services:
+
+  # ============================================================
+  # WAF — seul service avec ports exposés vers l'extérieur
+  # Filtre tout le trafic avant qu'il atteigne l'application
+  # ============================================================
+  waf:
+    image: docker.io/owasp/modsecurity-crs:3.3.9-nginx-202606290906
+    container_name: transcendence_waf
+    restart: always
+    # L'image tourne par défaut en utilisateur "nginx" (UID 101), mais
+    # /etc/nginx appartient à root:root (775) — sans ça, le entrypoint
+    # ne peut pas générer la config depuis les templates (envsubst échoue
+    # silencieusement) et nginx ne démarre jamais.
+    user: "0:0"
+    # ports:
+    #   - "80:8080"
+    #   - "443:8443"
+    # ports:
+    #   - "80:80"
+    #   - "443:443"
+    ports:
+    - "8080:8080"
+    - "8443:8443"
+    environment:
+      - BACKEND=http://web:3000       # redirige vers Next.js
+      - MODSEC_RULE_ENGINE=On         # bloque les attaques (SQLi, XSS, etc.)
+      - PARANOIA=1
+      - ANOMALY_INBOUND=5
+      - ANOMALY_OUTBOUND=4
+      - ALLOWED_METHODS=GET HEAD POST OPTIONS PUT PATCH DELETE
+      - NGINX_ALWAYS_TLS_REDIRECT=on  # redirige HTTP (8080) vers HTTPS (8443)
+    volumes:
+      # Monte la config WebSocket dans le template nginx du WAF.
+      # location_common.conf.template est inclus à l'intérieur du bloc server {}
+      # C'est le seul endroit où un bloc location peut être ajouté dans cette image.
+      - ./docker/nginx/location_common.conf.template:/etc/nginx/templates/includes/location_common.conf.template:z
+      # Utilise une variable nginx pour proxy_pass afin que Docker DNS soit
+      # réévalué quand le conteneur web est recréé avec une nouvelle IP.
+      - ./docker/nginx/proxy_backend.conf.template:/etc/nginx/templates/includes/proxy_backend.conf.template:z
+      # Exception ModSecurity pour Socket.IO : autorise Content-Type text/plain
+      # que Socket.IO utilise dans ses requêtes POST de polling.
+      # Monté avant les règles CRS : ctl:ruleRemoveById doit s'appliquer
+      # avant que REQUEST-920-PROTOCOL-ENFORCEMENT.conf ne soit évalué.
+      - ./docker/modsecurity/socket-io-exception.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-SOCKETIO-EXCEPTION.conf:z
+      # Exception ModSecurity pour l'accès par IP LAN (cross-machine) : sans ça,
+      # login/register sont bloqués en 403 dès qu'on accède via https://<IP>:8443.
+      - ./docker/modsecurity/lan-ip-access-exception.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-901-LAN-IP-EXCEPTION.conf:z
+      # Exception pour le callback OAuth Google : scope "userinfo.profile" déclenche
+      # faussement la règle LFI 930120 (.profile détecté comme fichier système).
+      - ./docker/modsecurity/google-oauth-exception.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-902-GOOGLE-OAUTH-EXCEPTION.conf:z
+      # Certificat SSL auto-signé généré par le Makefile (make prod) via openssl — sans sudo
+      # Ces 2 lignes remplacent le certificat auto-généré de l'image par le nôtre (certs/)
+      - ./certs/cert.pem:/etc/nginx/conf/server.crt:z
+      - ./certs/key.pem:/etc/nginx/conf/server.key:z
+    depends_on:
+      - web
+      - ws
+    networks:
+      - transcendence_network
+
+  # ============================================================
+  # HashiCorp Vault — gestionnaire de secrets
+  # Stocke les credentials chiffrés sur disque (server mode, pas dev mode)
+  # ============================================================
+  vault:
+    image: docker.io/hashicorp/vault:latest
+    container_name: transcendence_vault
+    restart: unless-stopped
+    # root dans le conteneur (pas sur l'hôte) — l'entrypoint de l'image fait
+    # le chown du volume nommé (créé root:root par Docker) vers vault:vault,
+    # puis redescend ses privilèges pour lancer le serveur.
+    user: root
+    ports:
+      # - "8200:8200"   # interface UI Vault accessible sur http://localhost:8200
+    environment:
+      - VAULT_ADDR=http://0.0.0.0:8200
+      - SKIP_SETCAP=1
+    cap_add:
+      - IPC_LOCK      # empêche les secrets d'être swappés sur le disque
+    volumes:
+      - ./vault/config:/vault/config:z  # fichier de configuration local.json
+      - vault_data:/vault/data:z        # données chiffrées persistantes
+    # L'entrypoint de l'image hashicorp/vault chown automatiquement
+    # /vault/config, /vault/logs et /vault/file vers l'utilisateur vault,
+    # mais PAS /vault/data (le chemin de storage configuré ici). Sans ce
+    # chown manuel, le volume nommé reste root:root et le process vault
+    # (UID 100, non-root) ne peut pas y écrire → "permission denied".
+    command: sh -c "chown -R vault:vault /vault/data && exec docker-entrypoint.sh vault server -config=/vault/config/local.json"
+    networks:
+      - transcendence_network
+
+  # ============================================================
+  # vault-unseal — initialise et descelle Vault au démarrage
+  # Première fois: génère les clés et le root token
+  # Redémarrages: relit les clés et descelle automatiquement
+  # ============================================================
+  vault-unseal:
+    image: docker.io/hashicorp/vault:latest
+    container_name: transcendence_vault_unseal
+    user: root
+    environment:
+      - VAULT_ADDR=http://vault:8200
+    volumes:
+      - vault_data:/vault/data:z        # lit/écrit init-keys.txt et root-token.txt
+      - ./vault/scripts:/vault/scripts:z  # script vault-unseal.sh
+    depends_on:
+      - vault
+    restart: unless-stopped
+    command: sh /vault/scripts/vault-unseal.sh
+    networks:
+      - transcendence_network
+
+  # ============================================================
+  # vault-init — charge les secrets du .env dans Vault (one-shot)
+  # secret/database → DB_USER, DB_PASSWORD, DB_NAME
+  # secret/app      → NEXTAUTH_SECRET, NEXTAUTH_URL, OAuth keys
+  # ============================================================
+  vault-init:
+    image: docker.io/hashicorp/vault:latest
+    container_name: transcendence_vault_init
+    environment:
+      - VAULT_ADDR=http://vault:8200
+      # secret/database
+      - DB_USER=${POSTGRES_USER}
+      - DB_PASS=${POSTGRES_PASSWORD}
+      - DB_NAME=${POSTGRES_DB}
+      # secret/app
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - NEXTAUTH_URL=${NEXTAUTH_URL}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - FORTYTWO_CLIENT_ID=${FORTYTWO_CLIENT_ID}
+      - FORTYTWO_CLIENT_SECRET=${FORTYTWO_CLIENT_SECRET}
+      - WS_SHARED_SECRET=${WS_SHARED_SECRET}
+    volumes:
+      - vault_data:/vault/data:z    # lit root-token.txt généré par vault-unseal
+    depends_on:
+      vault-unseal:
+        condition: service_started
+    command: >
+      sh -c "
+        echo '[vault-init] Attente du root token (écrit par vault-unseal)...' &&
+        until [ -f /vault/data/root-token.txt ]; do sleep 2; done &&
+        export VAULT_TOKEN=$$(cat /vault/data/root-token.txt) &&
+        echo '[vault-init] Attente du déscellement de Vault...' &&
+        until vault status -address=$$VAULT_ADDR 2>&1 | grep -q 'Sealed.*false'; do sleep 2; done &&
+        echo '[vault-init] Vault prêt — chargement des secrets' &&
+        vault secrets enable -path=secret kv-v2 || true &&
+        vault kv put secret/database DB_USER=$$DB_USER DB_PASSWORD=$$DB_PASS DB_NAME=$$DB_NAME &&
+        vault kv put secret/app NEXTAUTH_SECRET=$$NEXTAUTH_SECRET NEXTAUTH_URL=$$NEXTAUTH_URL GOOGLE_CLIENT_ID=$$GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET=$$GOOGLE_CLIENT_SECRET FORTYTWO_CLIENT_ID=$$FORTYTWO_CLIENT_ID FORTYTWO_CLIENT_SECRET=$$FORTYTWO_CLIENT_SECRET WS_SHARED_SECRET=$$WS_SHARED_SECRET &&
+        echo '[vault-init] Secrets chargés avec succès'
+      "
+    networks:
+      - transcendence_network
+
+volumes:
+  vault_data:
+
+networks:
+  transcendence_network:
+    driver: bridge
